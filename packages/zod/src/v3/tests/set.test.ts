@@ -1,5 +1,5 @@
 // @ts-ignore TS6133
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import * as z from "zod/v3";
 import { ZodIssueCode } from "zod/v3";
@@ -138,5 +138,46 @@ test("throws when the given set has multiple invalid entries", () => {
     expect(result.error.issues[0].path).toEqual([0]);
     expect(result.error.issues[1].code).toEqual(ZodIssueCode.invalid_type);
     expect(result.error.issues[1].path).toEqual([1]);
+  }
+});
+
+test.each(["max", "size"] as const)("%s rejects oversized sets before parsing elements", async (bound) => {
+  const element = vi.fn((value) => value);
+  const refinement = vi.fn(() => true);
+  const schema = z.object({
+    items: z.set(z.preprocess(element, z.string()))[bound](1, "too many").refine(refinement),
+  });
+  for (const input of [{ items: new Set([0, 1]) }, { items: new Set(["a", "b"]) }]) {
+    for (const result of [schema.safeParse(input), await schema.safeParseAsync(input)]) {
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toMatchObject([
+        { code: "too_big", maximum: 1, path: ["items"], message: "too many" },
+      ]);
+      expect(result.error?.issues).toHaveLength(1);
+    }
+  }
+  expect(element).not.toHaveBeenCalled();
+  expect(refinement).not.toHaveBeenCalled();
+});
+
+test("oversized sets do not start async element transforms", async () => {
+  const element = vi.fn(async (value: string) => value.length);
+  const schema = z.set(z.string().transform(element)).max(0);
+
+  expect(schema.safeParse(new Set(["a"])).success).toBe(false);
+  expect((await schema.safeParseAsync(new Set(["a"]))).success).toBe(false);
+  expect(element).not.toHaveBeenCalled();
+  expect(await schema.parseAsync(new Set())).toEqual(new Set());
+});
+
+test("set bounds preserve transformations and lower-bound errors", async () => {
+  const element = z.string().transform((value) => value.length);
+  for (const schema of [z.set(element).max(1), z.set(element).size(1)]) {
+    expect(schema.parse(new Set(["abc"]))).toEqual(new Set([3]));
+    expect(await schema.parseAsync(new Set(["abc"]))).toEqual(new Set([3]));
+  }
+  for (const schema of [z.set(z.string()), z.set(z.string()).min(3), z.set(z.string()).size(3)]) {
+    const result = await schema.safeParseAsync(new Set([0, 1]));
+    expect(result.error?.issues.filter((issue) => issue.code === "invalid_type")).toHaveLength(2);
   }
 });
