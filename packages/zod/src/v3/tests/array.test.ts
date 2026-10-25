@@ -1,5 +1,5 @@
 // @ts-ignore TS6133
-import { expect, test } from "vitest";
+import { expect, test, vi } from "vitest";
 
 import * as z from "zod/v3";
 import { util } from "../helpers/util.js";
@@ -68,4 +68,45 @@ test("parse should fail given sparse array", () => {
   const schema = z.array(z.string()).nonempty().min(1).max(3);
 
   expect(() => schema.parse(new Array(3))).toThrow();
+});
+
+test.each(["max", "length"] as const)("%s rejects oversized arrays before parsing elements", async (bound) => {
+  const element = vi.fn((value) => value);
+  const refinement = vi.fn(() => true);
+  const schema = z.object({
+    items: z.array(z.preprocess(element, z.string()))[bound](1, "too many").refine(refinement),
+  });
+  for (const input of [{ items: [0, 1] }, { items: ["a", "b"] }]) {
+    for (const result of [schema.safeParse(input), await schema.safeParseAsync(input)]) {
+      expect(result.success).toBe(false);
+      expect(result.error?.issues).toMatchObject([
+        { code: "too_big", maximum: 1, exact: bound === "length", path: ["items"], message: "too many" },
+      ]);
+      expect(result.error?.issues).toHaveLength(1);
+    }
+  }
+  expect(element).not.toHaveBeenCalled();
+  expect(refinement).not.toHaveBeenCalled();
+});
+
+test("oversized arrays do not start async element transforms", async () => {
+  const element = vi.fn(async (value: string) => value.length);
+  const schema = z.array(z.string().transform(element)).max(0);
+
+  expect(schema.safeParse(["a"]).success).toBe(false);
+  expect((await schema.safeParseAsync(["a"])).success).toBe(false);
+  expect(element).not.toHaveBeenCalled();
+  expect(await schema.parseAsync([])).toEqual([]);
+});
+
+test("array bounds preserve transformations and lower-bound errors", async () => {
+  const element = z.string().transform((value) => value.length);
+  for (const schema of [z.array(element).max(1), z.array(element).length(1)]) {
+    expect(schema.parse(["abc"])).toEqual([3]);
+    expect(await schema.parseAsync(["abc"])).toEqual([3]);
+  }
+  for (const schema of [z.array(z.string()), z.array(z.string()).min(3), z.array(z.string()).length(3)]) {
+    const result = await schema.safeParseAsync([0, 1]);
+    expect(result.error?.issues.filter((issue) => issue.code === "invalid_type")).toHaveLength(2);
+  }
 });
